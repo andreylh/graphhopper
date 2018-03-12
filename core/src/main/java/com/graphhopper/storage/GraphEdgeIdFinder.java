@@ -98,6 +98,45 @@ public class GraphEdgeIdFinder {
         bfs.start(graph.createEdgeExplorer(filter), qr.getClosestNode());
     }
 
+    public void findEdgesInJtsPolygon(final GHIntHashSet edgeIds, final Polygon polygon, EdgeFilter filter) {
+        Envelope box = polygon.getBoundary().getEnvelopeInternal();
+        Coordinate center = box.centre();
+        QueryResult qr = locationIndex.findClosest(center.y, center.x, filter);
+        // TODO: if there is no street close to the center it'll fail although there are roads covered. Maybe we should check edge points or some random points in the Shape instead?
+        if (!qr.isValid())
+            throw new IllegalArgumentException("Polygon " + polygon + " does not cover graph");
+
+        Coordinate coord = new Coordinate(qr.getSnappedPoint().lon, qr.getSnappedPoint().lat);
+        Point point = GeometryFactory.createPointFromInternalCoord(coord, polygon);
+        if (polygon.contains(point))
+            edgeIds.add(qr.getClosestEdge().getEdge());
+
+        BreadthFirstSearch bfs = new BreadthFirstSearch() {
+            final NodeAccess na = graph.getNodeAccess();
+            final com.vividsolutions.jts.geom.Polygon localpolygon = polygon;
+
+            @Override
+            protected boolean goFurther(int nodeId) {
+                Envelope bbox = localpolygon.getBoundary().getEnvelopeInternal();
+                bbox.expandBy(0.003);
+                double lat = na.getLatitude(nodeId);
+                double lon = na.getLongitude(nodeId);
+                return lat <= bbox.getMaxY() && lat >= bbox.getMinY() && lon <= bbox.getMaxX() && lon >= bbox.getMinX();
+            }
+
+            @Override
+            protected boolean checkAdjacent(EdgeIteratorState edge) {
+                Coordinate coord = new Coordinate(na.getLongitude(edge.getAdjNode()), na.getLatitude(edge.getAdjNode()));
+                Point point = GeometryFactory.createPointFromInternalCoord(coord, localpolygon);
+                if (localpolygon.contains(point)) {
+                    edgeIds.add(edge.getEdge());
+                }
+                return true;
+            }
+        };
+        bfs.start(graph.createEdgeExplorer(filter), qr.getClosestNode());
+    }
+
     /**
      * This method fills the edgeIds hash with edgeIds found inside the specified geometry
      */
@@ -136,7 +175,10 @@ public class GraphEdgeIdFinder {
             for (int i = 0; i < blockedCircularAreasArr.length; i++) {
                 String objectAsString = blockedCircularAreasArr[i];
                 String[] splittedObject = objectAsString.split(innerObjSep);
-                if (splittedObject.length == 4) {
+                if (splittedObject.length > 4) {
+                    final com.vividsolutions.jts.geom.Polygon polygon = parsePolygon(objectAsString);
+                    findEdgesInJtsPolygon(blockArea.blockedEdges, polygon, filter);
+                } else if (splittedObject.length == 4) {
                     final BBox bbox = BBox.parseTwoPoints(objectAsString);
                     if (bbox.calculateArea() > useEdgeIdsUntilAreaSize)
                         blockArea.add(bbox);
@@ -163,6 +205,29 @@ public class GraphEdgeIdFinder {
             }
         }
         return blockArea;
+    }
+
+    private Polygon parsePolygon(String pointsStr) {
+        String[] arr = pointsStr.split(",");
+
+        double[] lats = new double[arr.length /2];
+        double[] lons = new double[arr.length /2];
+
+        for (int j = 0; j < arr.length; j++) {
+            if (j % 2 == 0) {
+                lats[j / 2] = Double.parseDouble(arr[j]);
+            } else {
+                lons[(j - 1) / 2] = Double.parseDouble(arr[j]);
+            }
+        }
+
+        GeometryFactory factory = new GeometryFactory();
+        Coordinate[] coords = new Coordinate[lats.length];
+        for (int j = 0; j < coords.length; j++) {
+            coords[j] = new Coordinate(lons[j], lats[j]);
+        }
+
+        return factory.createPolygon(coords);
     }
 
     /**
